@@ -9,11 +9,12 @@ class seq2seq_atten(nn.Module):
         self.enc_LSTM = nn.LSTM(embedding_size, hidden_size, batch_first=True, bidirectional=True)
         self.dec_LSTM = nn.LSTM(embedding_size + hidden_size, hidden_size, batch_first=True, bidirectional=False)
 
-        self.enc_output_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
         self.enc_h_fc = nn.Linear(hidden_size * 2, hidden_size)
         self.enc_c_fc = nn.Linear(hidden_size * 2, hidden_size)
 
-        self.atten_states_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+        self.dec_feature_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+        self.enc_output_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+        self.all_feature_fc = nn.Linear(hidden_size * 2, 1)
 
         self.dec_out = nn.Linear(hidden_size * 2, num_classes)
 
@@ -27,11 +28,9 @@ class seq2seq_atten(nn.Module):
         enc_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence=enc_output, batch_first=True)
         # enc_output: batch_size, seq_size, hidden_size * 2
         # h/c: 2, batch_sizem, hidden_size
-        enc_feature = self.enc_output_fc(enc_output, dim=-1)
-        # batch_size, seq_size, hidden_size * 2
 
         # 需要做一个测试，用enc_output好还是enc_feature作为dec的使用好
-        return enc_output, enc_hidden, enc_feature
+        return enc_output, enc_hidden
 
     def decode_init(self, enc_hidden):
         # enc_hidden: 2 * (2, batch_size, hidden_size)
@@ -64,15 +63,20 @@ class seq2seq_atten(nn.Module):
         # dec_hidden 2 * ([1, batch_size, hidden_size])
 
         # 对dec_output进行处理， 得到batch_size, 1, hidden_size * 2的数据
-        atten_states = torch.cat([dec_hidden[0], dec_hidden[1]], dim=2)
+        dec_feature = torch.cat([dec_hidden[0], dec_hidden[1]], dim=2)
         # 1, batch_size, hidden_size * 2
-        atten_states = self.atten_states_fc(atten_states).unsqueeze(1)
+
+        dec_feature = self.dec_feature_fc(dec_feature).unsqueeze(1)
+        enc_feature = self.enc_output_fc(enc_output, dim=2)
         # batch_size, 1, hidden_size * 2
 
         # 计算输出与enc_output的权重
         # [batch_size, 1, hidden_size * 2]  [batch_size, seq_size, hidden_size * 2]
-        score = torch.bmm(atten_states, enc_output.permute(0, 2, 1))
-        atten = torch.softmax(score, dim=-1)
+        # score = torch.bmm(dec_feature, enc_feature.permute(0, 2, 1))
+        all_feature = torch.tanh(dec_feature + enc_feature)
+        scores = self.all_feature_fc(all_feature, dim=2)
+
+        atten = torch.softmax(scores, dim=-1)
         # batch_size, 1, seq_size
 
         dec_context = torch.bmm(atten, enc_output)
@@ -107,7 +111,7 @@ class seq2seq_atten(nn.Module):
         # enc_text: batch_size, seq_len
         # target: batch_size, seq_len
         loss = 0
-        enc_output, enc_hidden, enc_feature = self.encode(enc_text)
+        enc_output, enc_hidden = self.encode(enc_text)
         dec_input, dec_context, dec_hidden = self.decode_init(enc_hidden)
 
         use_teacher_forcing = torch.random() > 0.5
