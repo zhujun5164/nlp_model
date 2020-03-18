@@ -2,13 +2,16 @@ import torch
 import torch.nn as nn
 import random
 
+rand_unif_init_mag = 0.02
+trunc_norm_init_std = 1e-4
+
 
 def init_lstm_wt(lstm):
     for names in lstm._all_weights:
         for name in names:
             if name.startswith('weight_'):
                 wt = getattr(lstm, name)
-                wt.data.uniform_(-config.rand_unif_init_mag, config.rand_unif_init_mag)
+                wt.data.uniform_(-rand_unif_init_mag, rand_unif_init_mag)
             elif name.startswith('bias_'):
                 # set forget bias to 1
                 bias = getattr(lstm, name)
@@ -19,37 +22,48 @@ def init_lstm_wt(lstm):
 
 
 def init_linear_wt(linear):
-    linear.weight.data.normal_(std=config.trunc_norm_init_std)
+    linear.weight.data.normal_(std=trunc_norm_init_std)
     if linear.bias is not None:
-        linear.bias.data.normal_(std=config.trunc_norm_init_std)
+        linear.bias.data.normal_(std=trunc_norm_init_std)
 
 
 def init_wt_normal(wt):
-    wt.data.normal_(std=config.trunc_norm_init_std)
+    wt.data.normal_(std=trunc_norm_init_std)
 
 
 def init_wt_unif(wt):
-    wt.data.uniform_(-config.rand_unif_init_mag, config.rand_unif_init_mag)
+    wt.data.uniform_(rand_unif_init_mag, rand_unif_init_mag)
 
 
 class seq2seq_atten(nn.Module):
     def __init__(self, vocab_size_enc, vocab_size_dec, embedding_size, hidden_size):
         super(seq2seq_atten, self).__init__()
         self.enc_embedding = nn.Embedding(vocab_size_enc, embedding_size)
+        init_wt_normal(self.enc_embedding)
         self.enc_LSTM = nn.LSTM(embedding_size, hidden_size, batch_first=True, bidirectional=True)
+        init_lstm_wt(self.enc_LSTM)
 
         self.dec_embedding = nn.Embedding(vocab_size_dec, embedding_size)
+        init_wt_normal(self.dec_embedding)
         self.dec_input_fc = nn.Linear(embedding_size + hidden_size * 2, embedding_size)
+        init_linear_wt(self.dec_input_fc)
         self.dec_LSTM = nn.LSTM(embedding_size, hidden_size, batch_first=True, bidirectional=False)
+        init_linear_wt(self.dec_LSTM)
 
         self.enc_h_fc = nn.Linear(hidden_size * 2, hidden_size)
+        init_linear_wt(self.enc_h_fc)
         self.enc_c_fc = nn.Linear(hidden_size * 2, hidden_size)
+        init_linear_wt(self.enc_c_fc)
 
         self.dec_feature_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+        init_linear_wt(self.dec_feature_fc)
         self.enc_output_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+        init_linear_wt(self.enc_output_fc)
         self.all_feature_fc = nn.Linear(hidden_size * 2, 1)
+        init_linear_wt(self.all_feature_fc)
 
         self.dec_out = nn.Linear(hidden_size * 2 + hidden_size, vocab_size_dec)
+        init_linear_wt(self.dec_out)
 
         self.hidden_size = hidden_size
         self.vocab_size_dec = vocab_size_dec
@@ -155,7 +169,7 @@ class seq2seq_atten(nn.Module):
         # one_hot_target = torch.zeros((dec_target.shape[0], self.vocab_size_dec)).scatter_(1, dec_target.unsqueeze(1), 1)
         #     loss_step = loss_fn(dec_output, one_hot_target)  # batch_size, dec_vocab_size
         #     loss_step = loss_step.mul((dec_masks[:, i + 1]).unsqueeze(1))  # batch_size, dec_vocab_size
-        
+
         loss = loss_fn(predict, target)
         loss = loss.mul(mask)
 
