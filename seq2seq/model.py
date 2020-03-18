@@ -1,5 +1,35 @@
 import torch
 import torch.nn as nn
+import random
+
+
+def init_lstm_wt(lstm):
+    for names in lstm._all_weights:
+        for name in names:
+            if name.startswith('weight_'):
+                wt = getattr(lstm, name)
+                wt.data.uniform_(-config.rand_unif_init_mag, config.rand_unif_init_mag)
+            elif name.startswith('bias_'):
+                # set forget bias to 1
+                bias = getattr(lstm, name)
+                n = bias.size(0)
+                start, end = n // 4, n // 2
+                bias.data.fill_(0.)
+                bias.data[start:end].fill_(1.)
+
+
+def init_linear_wt(linear):
+    linear.weight.data.normal_(std=config.trunc_norm_init_std)
+    if linear.bias is not None:
+        linear.bias.data.normal_(std=config.trunc_norm_init_std)
+
+
+def init_wt_normal(wt):
+    wt.data.normal_(std=config.trunc_norm_init_std)
+
+
+def init_wt_unif(wt):
+    wt.data.uniform_(-config.rand_unif_init_mag, config.rand_unif_init_mag)
 
 
 class seq2seq_atten(nn.Module):
@@ -9,7 +39,8 @@ class seq2seq_atten(nn.Module):
         self.enc_LSTM = nn.LSTM(embedding_size, hidden_size, batch_first=True, bidirectional=True)
 
         self.dec_embedding = nn.Embedding(vocab_size_dec, embedding_size)
-        self.dec_LSTM = nn.LSTM(embedding_size + hidden_size, hidden_size, batch_first=True, bidirectional=False)
+        self.dec_input_fc = nn.Linear(embedding_size + hidden_size * 2, embedding_size)
+        self.dec_LSTM = nn.LSTM(embedding_size, hidden_size, batch_first=True, bidirectional=False)
 
         self.enc_h_fc = nn.Linear(hidden_size * 2, hidden_size)
         self.enc_c_fc = nn.Linear(hidden_size * 2, hidden_size)
@@ -18,17 +49,18 @@ class seq2seq_atten(nn.Module):
         self.enc_output_fc = nn.Linear(hidden_size * 2, hidden_size * 2)
         self.all_feature_fc = nn.Linear(hidden_size * 2, 1)
 
-        self.dec_out = nn.Linear(hidden_size * 2, vocab_size_dec)
+        self.dec_out = nn.Linear(hidden_size * 2 + hidden_size, vocab_size_dec)
 
         self.hidden_size = hidden_size
+        self.vocab_size_dec = vocab_size_dec
 
     def encode(self, encode_text, encode_mask):
         lengths = torch.sum(encode_mask, dim=1)
 
-        embeded = self.embedding(encode_text)  # batch_size, seq_len, embedding_size
+        embeded = self.enc_embedding(encode_text)  # batch_size, seq_len, embedding_size
         embeded = torch.nn.utils.rnn.pack_padded_sequence(input=embeded, lengths=lengths, batch_first=True, enforce_sorted=False)
         enc_output, enc_hidden = self.enc_LSTM(embeded)
-        enc_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence=enc_output, batch_first=True, padding_value=0.0, total_length=torch.max(lengths))
+        enc_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence=enc_output, batch_first=True, padding_value=0.0, total_length=int(torch.max(lengths).item()))
         # enc_output: batch_size, seq_size, hidden_size * 2
         # h/c: 2, batch_size, hidden_size
 
@@ -40,7 +72,7 @@ class seq2seq_atten(nn.Module):
 
         # init_dec_input
         # dec_input = torch.zeros((batch_size, 1))  # batch_size, 1 -- 初始的输入， 如果对文本最前面加上了BOS的话，也可以根据text来进行一个个取
-        dec_context = torch.zeros((batch_size, 1, self.hidden_size))  # batch_size, 1, hidden_size -- 包含前文的特征，最初认为是什么都看不了，所以是0
+        dec_context = torch.zeros((batch_size, 1, self.hidden_size * 2))  # batch_size, 1, hidden_size * 2-- 包含前文的特征，最初认为是什么都看不了，所以是0
 
         # transfor enc_hidden
         # 对enc_hidden进行转化，得到适用于dec层输入的hidden_states
@@ -50,10 +82,10 @@ class seq2seq_atten(nn.Module):
         #                            batch_size, hidden_size * 2 -relu(linear)-> batch_size, hidden_size
         # 动起来~
         enc_h, enc_c = enc_hidden  # (2, batch_size, hidden_size)
-        enc_h = enc_h.permute(2, 0, 1).view(-1, self.hidden_size * 2)
+        enc_h = enc_h.permute(2, 0, 1).reshape(-1, self.hidden_size * 2)
         dec_h = torch.relu(self.enc_h_fc(enc_h)).unsqueeze(0)  # 1, batch_size, hidden_size
 
-        enc_c = enc_c.permute(2, 0, 1).view(-1, self.hidden_size * 2)
+        enc_c = enc_c.permute(2, 0, 1).reshape(-1, self.hidden_size * 2)
         dec_c = torch.relu(self.enc_c_fc(enc_c)).unsqueeze(0)  # 1, batch_size, hidden_size
 
         dec_hidden = (dec_h, dec_c)  # 2 * (1, batch_size, hidden_size)
@@ -69,8 +101,8 @@ class seq2seq_atten(nn.Module):
         dec_feature = torch.cat([dec_hidden[0], dec_hidden[1]], dim=2)
         # 1, batch_size, hidden_size * 2
 
-        dec_feature = self.dec_feature_fc(dec_feature).unsqueeze(1)
-        enc_feature = self.enc_output_fc(enc_output, dim=2)
+        dec_feature = self.dec_feature_fc(dec_feature).permute(1, 0, 2)
+        enc_feature = self.enc_output_fc(enc_output)
         # batch_size, 1, hidden_size * 2
 
         # 计算输出与enc_output的权重
@@ -84,7 +116,7 @@ class seq2seq_atten(nn.Module):
         atten = torch.softmax(scores, dim=-1)
         # batch_size, 1, seq_len  batch_size, seq_len
         atten = torch.mul(atten.squeeze(), enc_mask)
-        atten = (atten / atten.sum(dim=1, keepdim=True)).unsqueeze(0)
+        atten = (atten / atten.sum(dim=1, keepdim=True)).unsqueeze(1)
 
         dec_context = torch.bmm(atten, enc_output)
         # batch_size, 1, hidden_size
@@ -94,12 +126,13 @@ class seq2seq_atten(nn.Module):
     def decode(self, enc_output, enc_mask, dec_input, dec_context, dec_hidden):
 
         # 在train步骤上，输入的是dec文档的文本内容,若为预测步骤则需要将上一个输出的预测结果用作输入，最开始输入的应该是启动标识符
-        dec_input = self.embedding(dec_input)
+        dec_input = self.dec_embedding(dec_input).unsqueeze(1)
         # batch_size, 1, embedding_size
 
         # 这一操作其实就有点像BahdanauAttn
         dec_input = torch.cat((dec_input, dec_context), dim=-1)
-        # batch_size, 1, embedding_size + hidden_size
+        # batch_size, 1, embedding_size + hidden_size * 2
+        dec_input = self.dec_input_fc(dec_input)
 
         dec_output, dec_hidden = self.dec_LSTM(dec_input, dec_hidden)
         # dec_output: batch_size, 1, hidden_size
@@ -110,23 +143,37 @@ class seq2seq_atten(nn.Module):
         # batch_size, 1, seq_len_enc
         # batch_size, 1, hidden_size
 
-        dec_output = self.dec_out(torch.cat((dec_output, dec_context), dim=2), dim=2).squeeze(1)
+        dec_output = self.dec_out(torch.cat((dec_output, dec_context), dim=2)).squeeze(1)
         # batch_size, num_classes
         return dec_output, dec_context, dec_hidden, atten
+
+    def loss(self, loss_fn, predict, target, mask):
+        # predict [batch_size,  N]
+        # target [batch_size]
+
+        # 之前做错做了个BCEWithlogitloss的，保存下
+        # one_hot_target = torch.zeros((dec_target.shape[0], self.vocab_size_dec)).scatter_(1, dec_target.unsqueeze(1), 1)
+        #     loss_step = loss_fn(dec_output, one_hot_target)  # batch_size, dec_vocab_size
+        #     loss_step = loss_step.mul((dec_masks[:, i + 1]).unsqueeze(1))  # batch_size, dec_vocab_size
+        
+        loss = loss_fn(predict, target)
+        loss = loss.mul(mask)
+
+        return loss
 
     def forward(self, enc_texts, enc_masks, dec_texts, dec_masks, loss_fn):
         # enc_text: batch_size, seq_len
         # target: batch_size, seq_len
-        enc_output, enc_hidden = self.encode(enc_texts)
+        enc_output, enc_hidden = self.encode(enc_texts, enc_masks)
         # dec_input, dec_context, dec_hidden = self.decode_init(enc_hidden)
         dec_context, dec_hidden = self.decode_init(enc_hidden)
 
         dec_batch_size, dec_seq_len = dec_texts.shape
 
-        loss = 0
+        loss = []
         predict = []
 
-        use_teacher_forcing = torch.random() > 0.5
+        use_teacher_forcing = True if random.random() > 0. else False
         if use_teacher_forcing:
             for i in range(dec_seq_len - 1):
                 dec_input = dec_texts[:, i]
@@ -135,31 +182,36 @@ class seq2seq_atten(nn.Module):
                 dec_output, dec_context, dec_hidden, atten = self.decode(enc_output, enc_masks, dec_input, dec_context, dec_hidden)
 
                 # compute loss
-                loss_step = loss_fn(dec_output, dec_target)  # batch_size
-                loss_step = loss_step.mul(dec_masks[:, i + 1])
-                loss += loss_step / torch.sum(dec_masks[:, i + 1])
+                loss_step = self.loss(loss_fn, dec_output, dec_target, dec_masks[:, i + 1])
+                # 希望输出的是batch_size
 
-                _, step_predict = (torch.softmax(dec_output).data).topk(1)  # batch_size, 1
-                predict.append(step_predict)
+                loss.append(loss_step)
+
+                # get_predict
+                _, step_predict = (torch.softmax(dec_output, dim=-1).data).topk(1)  # batch_size, 1
+                predict.append(step_predict.squeeze())
 
         else:
             for i in range(dec_seq_len - 1):
-
                 if i == 0:
                     dec_input = dec_texts[:, i]
                 dec_target = dec_texts[:, i + 1]
 
                 dec_output, dec_context, dec_hidden, atten = self.decode(enc_output, enc_masks, dec_input, dec_context, dec_hidden)
-                _, dec_input = (torch.softmax(dec_output).data).topk(1)  # batch_size, 1
+                _, dec_input = (torch.softmax(dec_output, dim=-1).data).topk(1)  # batch_size, 1
+                dec_input = dec_input.squeeze()
 
                 # compute loss
-                loss_step = loss_fn(dec_output, dec_target)  # batch_size
-                loss_step = loss_step.mul(dec_masks[:, i + 1])
-                loss += loss_step / torch.sum(dec_masks[:, i + 1])
+                loss_step = self.loss(loss_fn, dec_output, dec_target, dec_masks[:, i + 1])
+                # 希望输出的是batch_size
 
+                loss.append(loss_step)
                 predict.append(dec_input)
 
         predict = torch.stack((predict[:]), dim=-1)
+
+        loss = torch.stack((loss[:]), dim=-1)
+        loss = torch.mean(loss.sum(dim=1) / dec_masks.sum(dim=1))
 
         return loss, predict
 

@@ -69,6 +69,7 @@ def get_minibatches(n, minibatch_size, shuffle=True):
 
 
 def pad_data(data):
+
     seq_len = [len(sentence) for sentence in data]
     max_len = max(seq_len)
     n_samples = len(data)
@@ -103,7 +104,7 @@ def word2id(sentences, word2id_dict):
     word_ids = []
     for i in range(len(sentences)):
         words = sentences[i].split(' ')
-        word_ids.append(word2id_dict[word] if word in word2id_dict.keys() else word2id_dict['UNK'] for word in words)
+        word_ids.append([word2id_dict[word] if word in word2id_dict.keys() else word2id_dict['UNK'] for word in words])
     return word_ids
 
 
