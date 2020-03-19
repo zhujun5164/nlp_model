@@ -2,6 +2,40 @@ import torch
 from data_utils import read_anki_data, data_prepared, word2id, get_examples
 from model import seq2seq_atten
 from tqdm import tqdm
+# from tensorboard import summary
+
+
+def train(model, enc_data, enc_mask, dec_data, dec_mask):
+
+    model.train()
+
+    enc_data = torch.LongTensor(enc_data)  # batch_size, seq_len
+    enc_mask = torch.as_tensor(enc_mask).float()  # batch_size, seq_len
+
+    dec_data = torch.LongTensor(dec_data)  # batch_size, seq_len
+    dec_mask = torch.as_tensor(dec_mask).float()  # batch_size, seq_len
+
+    optim.zero_grad()
+    loss, predict = model(enc_data, enc_mask, dec_data, dec_mask, loss_fn)
+
+    loss.backward()
+
+    torch.nn.utils.clip_grad_norm(params_to_update, 5.0)
+    optim.step()
+
+    return loss, predict
+
+
+def eval(model, enc_data, enc_mask):
+
+    model.eval()
+
+    enc_data = torch.LongTensor(enc_data)  # batch_size, seq_len
+    enc_mask = torch.as_tensor(enc_mask).float()  # batch_size, seq_len
+
+    predict = model(enc_data, enc_mask)
+    return predict
+
 
 # config
 data_path = 'D:/data/nlp_model/seq2seq/fra.txt'
@@ -40,23 +74,14 @@ optim = torch.optim.Adam(params_to_update, lr=learning_rate)
 
 loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
 
+i = 0
 for n in range(epoches):
-    model.train()
+
     running_loss = 0.0
     running_corrects = 0
-    n = 0
+
     for enc_data, enc_mask, dec_data, dec_mask in tqdm(data, ncols=80):
-        # batch_size, seq_len
-        enc_data = torch.LongTensor(enc_data)  # batch_size, seq_len
-        enc_mask = torch.as_tensor(enc_mask).float()  # batch_size, seq_len
+        i += 1
+        loss, predict = train(model, enc_data, enc_mask, dec_data, dec_mask)
 
-        dec_data = torch.LongTensor(dec_data)  # batch_size, seq_len
-        dec_mask = torch.as_tensor(dec_mask).float()  # batch_size, seq_len
-
-        optim.zero_grad()
-        loss, predict = model(enc_data, enc_mask, dec_data, dec_mask, loss_fn)
-
-        loss.backward()
-
-        torch.nn.utils.clip_grad_norm(params_to_update, 5.0)
-        optim.step()
+    # eval
